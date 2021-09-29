@@ -199,30 +199,6 @@ class SlurmCluster(AbstractCluster):
         else:
             print('launch failed...')
 
-    def slurm_time_to_seconds(self, job_time):
-        seconds = 0
-        time_component = job_time
-        if '-' in job_time:
-            days, time_component = job_time.split('-')
-            seconds += int(days) * 24 * 60 * 60
-
-        time_components = time_component.split(':')
-        if len(time_components) == 3:
-            hours, minutes, secs = time_components
-            time_seconds = int(secs) + (int(minutes) * 60) + (int(hours) * 60 * 60)
-            seconds += time_seconds
-
-        elif len(time_components) == 2:
-            minutes, secs = time_components
-            time_seconds = int(secs) + (int(minutes) * 60)
-            seconds += time_seconds
-
-        elif len(time_components) == 1:
-            secs = time_components[0]
-            seconds += int(secs)
-
-        return seconds
-
     def call_save(self):
         print('calling save')
 
