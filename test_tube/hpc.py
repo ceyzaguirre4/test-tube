@@ -60,7 +60,6 @@ class AbstractCluster(object):
         # detect when this was called because a slurm object started a hopt.
         # if true, remove the flag so tt logs don't show it
         if hyperparam_optimizer is not None:
-
             self.is_from_slurm_object = HyperOptArgumentParser.TRIGGER_CMD in vars(self.hyperparam_optimizer) and vars(self.hyperparam_optimizer)[HyperOptArgumentParser.TRIGGER_CMD] == True
             if self.is_from_slurm_object:
                 self.hyperparam_optimizer.__delattr__(HyperOptArgumentParser.TRIGGER_CMD)
@@ -118,10 +117,13 @@ class SlurmCluster(AbstractCluster):
             nb_trials,
             job_name,
             enable_auto_resubmit=False,
-            job_display_name=None
+            job_display_name=None,
+            max_parallel_trials=None,         # Run at most `max_parallel_trials` at the same time
     ):
         if job_display_name is None:
             job_display_name = job_name
+        
+        self.max_parallel_trials = max_parallel_trials
 
         self.__optimize_parallel_cluster_internal(train_function, nb_trials, job_name, job_display_name,
                                                   enable_auto_resubmit, on_gpu=True)
@@ -132,10 +134,13 @@ class SlurmCluster(AbstractCluster):
             nb_trials,
             job_name,
             enable_auto_resubmit=False,
-            job_display_name=None
+            job_display_name=None,
+            max_parallel_trials=None,         # Run at most `max_parallel_trials` at the same time
     ):
         if job_display_name is None:
             job_display_name = job_name
+        
+        self.max_parallel_trials = max_parallel_trials
 
         self.__optimize_parallel_cluster_internal(train_function, nb_trials, job_name, job_display_name,
                                                   enable_auto_resubmit, on_gpu=False)
@@ -147,7 +152,7 @@ class SlurmCluster(AbstractCluster):
             job_name,
             job_display_name,
             enable_auto_resubmit,
-            on_gpu
+            on_gpu,
     ):
         """
         Runs optimization on the attached cluster
@@ -161,43 +166,57 @@ class SlurmCluster(AbstractCluster):
         self.on_gpu = on_gpu
         self.enable_auto_resubmit = enable_auto_resubmit
 
-        # layout logging structure
-        self.__layout_logging_dir()
-
         if self.is_from_slurm_object:
             # Script is called by slurm: it's an actual experiment.
             self.__run_experiment(train_function)
         else:
             # Launcher script. Generate trials and launch jobs.
 
+            # layout logging structure
+            self.__layout_logging_dir()
+
             # generate hopt trials
             trials = self.hyperparam_optimizer.generate_trials(nb_trials)
 
             # get the max test tube exp version so far if it's there
-            scripts_path = os.path.join(self.log_path, 'slurm_out_logs')
-            next_trial_version = self.__get_max_trial_version(scripts_path)
+            scripts_parent_dir = os.path.join(self.log_path, 'slurm_out_logs')
+            next_trial_version = self.__get_max_trial_version(scripts_parent_dir)
 
             # for each trial, generate a slurm command
+            script_paths = []
             for i, trial_params in enumerate(trials):
                 exp_i = i + next_trial_version
-                self.schedule_experiment(trial_params, exp_i)
+                experiment_script_path = self.generate_experiment_script(trial_params, exp_i)
+                script_paths.append(experiment_script_path)
 
-    def schedule_experiment(self, trial_params, exp_i):
-        timestamp = datetime.datetime.now().strftime("%Y-%m-%d__%H-%M-%S")
-        timestamp = 'trial_{}_{}'.format(exp_i, timestamp)
+            # schedule them all together in a single slurm array and launch array
+            slurm_cmd_path = self.schedule_array(script_paths)
+            print('\nlaunching exp...')
+            result = call('{} {}'.format(AbstractCluster.RUN_CMD, slurm_cmd_path), shell=True)
+            if result == 0:
+                print('launched exp ', slurm_cmd_path)
+            else:
+                print('launch failed...')
+    
+    def schedule_array(self, script_paths):
+        slurm_cmd_path = os.path.join(self.slurm_files_log_path, 'run_trials.sh')
+        slurm_cmd = self.__build_slurm_command(self.on_gpu, script_paths)
+        self.__save_script(slurm_cmd, slurm_cmd_path)
+        return slurm_cmd_path
+
+    def generate_experiment_script(self, trial_params, exp_i):
+        """
+        Generates the experiment script and saves it to `script_path`.
+
+        Returns `script_path`.
+        """
 
         # generate command
-        slurm_cmd_script_path = os.path.join(self.slurm_files_log_path, '{}_slurm_cmd.sh'.format(timestamp))
-        slurm_cmd = self.__build_slurm_command(trial_params, slurm_cmd_script_path, timestamp, exp_i, self.on_gpu)
-        self.__save_slurm_cmd(slurm_cmd, slurm_cmd_script_path)
+        script_path = os.path.join(self.slurm_files_log_path, 'trial_{}.sh'.format(exp_i))
+        script = self.__build_experiment_script(trial_params, script_path, exp_i)
+        self.__save_script(script, script_path)
 
-        # run script to launch job
-        print('\nlaunching exp...')
-        result = call('{} {}'.format(AbstractCluster.RUN_CMD, slurm_cmd_script_path), shell=True)
-        if result == 0:
-            print('launched exp ', slurm_cmd_script_path)
-        else:
-            print('launch failed...')
+        return script_path
 
     def call_save(self):
         print('calling save')
@@ -252,9 +271,9 @@ class SlurmCluster(AbstractCluster):
             traceback.print_exc()
             raise SystemExit
 
-    def __save_slurm_cmd(self, slurm_cmd, slurm_cmd_script_path):
-        with open(slurm_cmd_script_path, mode='w') as file:
-            file.write(slurm_cmd)
+    def __save_script(self, script, script_path):
+        with open(script_path, mode='w') as file:
+            file.write(script)
 
     def __get_max_trial_version(self, path):
         files = os.listdir(path)
@@ -273,8 +292,11 @@ class SlurmCluster(AbstractCluster):
         :return:
         """
 
-        # format the logging folder path
-        slurm_out_path = os.path.join(self.log_path, self.job_name)
+        timestamp = datetime.datetime.now().strftime("%Y-%m-%d__%H-%M-%S")
+
+        # creates a timestamped subdirectory with all the experiments
+
+        slurm_out_path = os.path.join(self.log_path, self.job_name, timestamp)
 
         self.log_path = slurm_out_path
 
@@ -333,7 +355,7 @@ class SlurmCluster(AbstractCluster):
         v = str(v)
         return '[' in v or ';' in v or ' ' in v
 
-    def __build_slurm_command(self, trial, slurm_cmd_script_path, timestamp, exp_i, on_gpu):
+    def __build_slurm_command(self, on_gpu, script_paths):
         sub_commands = []
 
         command =[
@@ -345,17 +367,16 @@ class SlurmCluster(AbstractCluster):
         sub_commands.extend(command)
 
         # add job name
-        job_with_version = '{}v{}'.format(self.job_display_name, exp_i)
         command = [
             '# set a job name',
-            '#SBATCH --job-name={}'.format(job_with_version),
+            '#SBATCH --job-name={}'.format(self.job_display_name),
             '#################\n',
         ]
         sub_commands.extend(command)
 
         # add out output
         if self.enable_log_out:
-            out_path = os.path.join(self.out_log_path, '{}_slurm_output_%j.out'.format(timestamp))
+            out_path = os.path.join(self.out_log_path, "%A-%a.log")
             command = [
                 '# a file for job output, you can check job progress',
                 '#SBATCH --output={}'.format(out_path),
@@ -365,7 +386,7 @@ class SlurmCluster(AbstractCluster):
 
         # add err output
         if self.enable_log_err:
-            err_path = os.path.join(self.err_log_path, '{}_slurm_output_%j.err'.format(timestamp))
+            err_path = os.path.join(self.err_log_path, "%A-%a.err")
             command = [
                 '# a file for errors',
                 '#SBATCH --error={}'.format(err_path),
@@ -427,7 +448,21 @@ class SlurmCluster(AbstractCluster):
             f'#SBATCH --signal=USR1@{self.minutes_to_checkpoint_before_walltime * 60}',
             '#################\n'
         ]
+        sub_commands.extend(command)
 
+        # add slurm array command to launch multiple times
+        if self.max_parallel_trials != None:      # Run at most `max_parallel_trials` at the same time
+            command = [
+                '# run as slurm array ',
+                f'#SBATCH --array=0-{len(script_paths)-1}%{self.max_parallel_trials}',
+                '#################\n'
+            ]
+        else:
+            command = [
+                '# run as slurm array ',
+                f'#SBATCH --array=0-{len(script_paths)-1}',     # TODO: support for multiple scripts per GPU
+                '#################\n'
+            ]
         sub_commands.extend(command)
 
         # Subscribe to email if requested
@@ -456,6 +491,32 @@ class SlurmCluster(AbstractCluster):
             spaces = '#################\n'
             sub_commands.extend([comment, cmd, spaces])
 
+        script_paths = [f'"{path}"' for path in script_paths]
+        cmd = f"SCRIPT_ARRAY=( {' '.join(script_paths)} )"
+        cmd += """
+echo ${SCRIPT_ARRAY[SLURM_ARRAY_TASK_ID]}
+sh ${SCRIPT_ARRAY[SLURM_ARRAY_TASK_ID]}
+        """
+        sub_commands.append(cmd)
+
+        # remove spaces before the hash
+        sub_commands = [x.lstrip() for x in sub_commands]
+
+        # build full command with empty lines in between
+        full_command = '\n'.join(sub_commands)
+        return full_command
+
+    def __build_experiment_script(self, trial, slurm_cmd_script_path, exp_i):
+        sub_commands = []
+
+        command =[
+            '#!/bin/bash',
+            '#',
+            '# Auto-generated by test-tube (https://github.com/williamFalcon/test-tube)',
+            '#################\n'
+        ]
+        sub_commands.extend(command)
+
         # load modules
         sub_commands.append('\n')
         for module in self.modules:
@@ -478,7 +539,7 @@ class SlurmCluster(AbstractCluster):
                                                  HyperOptArgumentParser.SLURM_EXP_CMD,
                                                  exp_i)
 
-        cmd = 'srun {} {} {}'.format(self.python_cmd, self.script_name, trial_args)
+        cmd = '{} {} {}'.format(self.python_cmd, self.script_name, trial_args)
         sub_commands.append(cmd)
 
         # build full command with empty lines in between
