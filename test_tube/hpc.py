@@ -119,6 +119,7 @@ class SlurmCluster(AbstractCluster):
             enable_auto_resubmit=False,
             job_display_name=None,
             max_parallel_trials=None,         # Run at most `max_parallel_trials` at the same time
+            debug=False,                        # if debug no experiments will run
     ):
         if job_display_name is None:
             job_display_name = job_name
@@ -126,7 +127,7 @@ class SlurmCluster(AbstractCluster):
         self.max_parallel_trials = max_parallel_trials
 
         self.__optimize_parallel_cluster_internal(train_function, nb_trials, job_name, job_display_name,
-                                                  enable_auto_resubmit, on_gpu=True)
+                                                  enable_auto_resubmit, on_gpu=True, debug=debug)
 
     def optimize_parallel_cluster_cpu(
             self,
@@ -136,6 +137,7 @@ class SlurmCluster(AbstractCluster):
             enable_auto_resubmit=False,
             job_display_name=None,
             max_parallel_trials=None,         # Run at most `max_parallel_trials` at the same time
+            debug=False,                        # if debug no experiments will run
     ):
         if job_display_name is None:
             job_display_name = job_name
@@ -143,7 +145,7 @@ class SlurmCluster(AbstractCluster):
         self.max_parallel_trials = max_parallel_trials
 
         self.__optimize_parallel_cluster_internal(train_function, nb_trials, job_name, job_display_name,
-                                                  enable_auto_resubmit, on_gpu=False)
+                                                  enable_auto_resubmit, on_gpu=False, debug=debug)
 
     def __optimize_parallel_cluster_internal(
             self,
@@ -153,6 +155,7 @@ class SlurmCluster(AbstractCluster):
             job_display_name,
             enable_auto_resubmit,
             on_gpu,
+            debug=False,
     ):
         """
         Runs optimization on the attached cluster
@@ -191,12 +194,15 @@ class SlurmCluster(AbstractCluster):
 
             # schedule them all together in a single slurm array and launch array
             slurm_cmd_path = self.schedule_array(script_paths)
-            print('\nlaunching exp...')
-            result = call('{} {}'.format(AbstractCluster.RUN_CMD, slurm_cmd_path), shell=True)
-            if result == 0:
-                print('launched exp ', slurm_cmd_path)
+            if not debug:
+                print('\nlaunching exp...')
+                result = call('{} {}'.format(AbstractCluster.RUN_CMD, slurm_cmd_path), shell=True)
+                if result == 0:
+                    print('launched exp ', slurm_cmd_path)
+                else:
+                    print('launch failed...')
             else:
-                print('launch failed...')
+                print('\nDEBUG: skipping launch...', slurm_cmd_path)
     
     def schedule_array(self, script_paths):
         slurm_cmd_path = os.path.join(self.slurm_files_log_path, 'run_trials.sh')
@@ -259,17 +265,49 @@ class SlurmCluster(AbstractCluster):
             signal.signal(signal.SIGUSR1, self.sig_handler)
             signal.signal(signal.SIGTERM, self.term_handler)
 
-        try:
-            # run training
-            train_function(self.hyperparam_optimizer, self)
+        # if its part of a Weights and Biases sweep then get hyperparams from the controller
+        if "wandb_project_name" in self.hyperparam_optimizer and "wandb_sweep_id" in self.hyperparam_optimizer:
+            # TODO: move code to its own file
+            import wandb
 
-        except Exception as e:
-            print('Caught exception in worker thread', e)
+            def wrapped_train_function():
+                with wandb.init() as run:
+                    # update the hyperparams with the ones from the wandb controller
+                    config = wandb.config
+                    for param_name, param_value in config.items():
+                        setattr(self.hyperparam_optimizer, param_name, param_value)
 
-            # This prints the type, value, and stack trace of the
-            # current exception being handled.
-            traceback.print_exc()
-            raise SystemExit
+                    try:
+                        # run training
+                        train_function(self.hyperparam_optimizer, self)
+
+                    except Exception as e:
+                        print('Caught exception in worker thread', e)
+
+                        # This prints the type, value, and stack trace of the
+                        # current exception being handled.
+                        traceback.print_exc()
+                        raise SystemExit
+
+            wandb.agent(
+                sweep_id=self.hyperparam_optimizer.wandb_sweep_id,
+                project=self.hyperparam_optimizer.wandb_project_name,
+                function=wrapped_train_function,
+                count=1,                                                # run one experiment per agent
+            )
+
+        else:
+            try:
+                # run training
+                train_function(self.hyperparam_optimizer, self)
+
+            except Exception as e:
+                print('Caught exception in worker thread', e)
+
+                # This prints the type, value, and stack trace of the
+                # current exception being handled.
+                traceback.print_exc()
+                raise SystemExit
 
     def __save_script(self, script, script_path):
         with open(script_path, mode='w') as file:

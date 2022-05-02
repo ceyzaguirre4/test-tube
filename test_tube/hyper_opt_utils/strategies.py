@@ -1,23 +1,46 @@
 """Hyperparameter search strategies."""
 import itertools
 import json
+import re
 import random
 
 
-def generate_trials(strategy, flat_params, nb_trials=None):
+def _flatten_params(params):
+    """
+    Turns a list of parameters with values into a flat tuple list of lists
+    so we can permute
+    :param params:
+    :return:
+    """
+    flat_params = []
+    for i, (opt_name, opt_arg) in enumerate(params.items()):
+        if opt_arg.tunable:
+            clean_name = opt_name.strip('-')
+            clean_name = re.sub('-', '_', clean_name)
+            param_groups = []
+            for val in opt_arg.opt_values:
+                param_groups.append({'idx': i, 'val': val, 'name': clean_name})
+            flat_params.append(param_groups)
+    return flat_params
+
+
+def generate_trials(strategy, params, nb_trials=None):
     r"""Generates the parameter combinations to search.
 
-    Two search strategies are implemented:
+    Four search strategies are implemented:
     1. `grid_search`: creates a search space that consists of the
         product of all flat_params. If `nb_trials` is specified
         the first `nb_trials` combinations are searched.
     2. `random_search`: Creates random combinations of the
         hyperparameters. Can be used for a more efficient search.
         See (Bergstra and Bengio, 2012) for more details.
+    3. `wandb_grid_search`: TODO
+    4. `wandb_random_search`: TODO
 
     :param strategy: The hyperparameter search to strategy. Can be
-        one of: {`grid_search`, `random`}.
-    :param flat_params: The hyperparameter arguments to iterate over.
+        one of: {`grid_search`, `random`, `wandb_grid_search`,
+        `wandb_random_search`}.
+    :param params: The hyperparameter arguments.
     :param nb_trials: The number of hyperparameter combinations to try.
     Generates the parameter combinations for each requested trial
     :param strategy:
@@ -26,15 +49,16 @@ def generate_trials(strategy, flat_params, nb_trials=None):
     :return:
     """
     if strategy == 'grid_search':
-        trials = generate_grid_search_trials(flat_params, nb_trials)
-        return trials
+        trials = generate_grid_search_trials(_flatten_params(params), nb_trials)
     elif strategy == 'random_search':
-        trials = generate_random_search_trials(flat_params, nb_trials)
-        return trials
+        trials = generate_random_search_trials(_flatten_params(params), nb_trials)
+    elif strategy == 'wandb_grid_search' or strategy == 'wandb_random_search':
+        raise NotImplementedError("Wandb search not implemented yet except through SLURMCLUSTER.")
     else:
         raise ValueError(
             ('Unknown strategy "{}". Must be one of '
-             '{{grid_search, random_search}}').format(strategy))
+             '{{grid_search, random_search, wandb_grid_search, wandb_random_search}}').format(strategy))
+    return trials
 
 
 def generate_grid_search_trials(flat_params, nb_trials):

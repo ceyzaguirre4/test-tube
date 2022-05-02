@@ -75,17 +75,21 @@ class HyperOptArgumentParser(ArgumentParser):
     SLURM_CMD_PATH = 'test_tube_slurm_cmd_path'
     SLURM_EXP_CMD = 'hpc_exp_number'
     SLURM_LOAD_CMD = 'test_tube_do_checkpoint_load'
+    WANDB_SWEEP_ID = 'wandb_sweep_id'
+    WANDB_PROJECT_NAME = 'wandb_project_name'
     CMD_MAP = {
         TRIGGER_CMD: bool,
         SLURM_CMD_PATH: str,
         SLURM_EXP_CMD: int,
-        SLURM_LOAD_CMD: bool
+        SLURM_LOAD_CMD: bool,
+        WANDB_SWEEP_ID: str,
+        WANDB_PROJECT_NAME: str,
     }
 
-    def __init__(self, strategy='grid_search', **kwargs):
+    def __init__(self, strategy='grid_search', wandb_project_name=None, **kwargs):
         """
 
-        :param strategy: 'grid_search', 'random_search'
+        :param strategy: 'grid_search', 'random_search', 'wandb_grid_search', 'wandb_random_search'
         :param enabled:
         :param experiment:
         :param kwargs:
@@ -93,6 +97,7 @@ class HyperOptArgumentParser(ArgumentParser):
         ArgumentParser.__init__(self, **kwargs)
 
         self.strategy = strategy
+        self.wandb_project_name = wandb_project_name
         self.trials = []
         self.parsed_args = None
         self.opt_args = {}
@@ -266,7 +271,7 @@ class HyperOptArgumentParser(ArgumentParser):
     def opt_trials(self, num):
         self.trials = strategies.generate_trials(
             strategy=self.strategy,
-            flat_params=self.__flatten_params(self.opt_args),
+            params=self.opt_args,
             nb_trials=num,
         )
 
@@ -275,14 +280,48 @@ class HyperOptArgumentParser(ArgumentParser):
             yield ns
 
     def generate_trials(self, nb_trials):
-        trials = strategies.generate_trials(
-            strategy=self.strategy,
-            flat_params=self.__flatten_params(self.opt_args),
-            nb_trials=nb_trials,
-        )
+        if self.strategy == 'wandb_grid_search' or self.strategy == 'wandb_random_search':
+            # dont generate trials, that's handled by wandb
+            # TODO: move code to its own file
 
-        trials = [self.__namespace_from_trial(x) for x in trials]
-        return trials
+            import wandb
+
+            def _to_iterable_param_dict(params):
+                """
+                Converts a single hyperparameter to a wandb parameter dict.
+                :param params: 
+                :return:
+                """
+                expanded_params = {}
+                for (opt_name, opt_arg) in params.items():
+                    if opt_arg.tunable:
+                        clean_name = opt_name.strip('-')
+                        clean_name = re.sub('-', '_', clean_name)
+                        expanded_params[clean_name] = {"values": opt_arg.opt_values}
+                return expanded_params
+            
+            if nb_trials is None:
+                raise TypeError('nb_trials to be an int.')
+            
+            params_dict = _to_iterable_param_dict(self.opt_args)
+            method = "grid" if self.strategy == "wandb_grid_search" else "random"
+            sweep_config = dict(parameters=params_dict, method=method)
+            # print(sweep_config)
+            sweep_id = wandb.sweep(
+                sweep_config,
+                project=self.wandb_project_name,
+            )
+
+            return [TTNamespace(wandb_project_name=self.wandb_project_name, wandb_sweep_id=sweep_id) for _ in range(nb_trials)]
+        else:
+            trials = strategies.generate_trials(
+                strategy=self.strategy,
+                params=self.opt_args,
+                nb_trials=nb_trials,
+            )
+
+            trials = [self.__namespace_from_trial(x) for x in trials]
+            return trials
 
     def optimize_parallel_gpu(
             self,
@@ -299,7 +338,7 @@ class HyperOptArgumentParser(ArgumentParser):
         """
         self.trials = strategies.generate_trials(
             strategy=self.strategy,
-            flat_params=self.__flatten_params(self.opt_args),
+            params=self.opt_args,
             nb_trials=max_nb_trials,
         )
 
@@ -378,7 +417,7 @@ class HyperOptArgumentParser(ArgumentParser):
         """
         self.trials = strategies.generate_trials(
             strategy=self.strategy,
-            flat_params=self.__flatten_params(self.opt_args),
+            params=self.opt_args,
             nb_trials=nb_trials
         )
 
@@ -400,7 +439,7 @@ class HyperOptArgumentParser(ArgumentParser):
     ):
         self.trials = strategies.generate_trials(
             strategy=self.strategy,
-            flat_params=self.__flatten_params(self.opt_args),
+            params=self.opt_args,
             nb_trials=nb_trials
         )
 
@@ -442,24 +481,6 @@ class HyperOptArgumentParser(ArgumentParser):
                 trial_dict[k] = v
 
         return TTNamespace(**trial_dict)
-
-    def __flatten_params(self, params):
-        """
-        Turns a list of parameters with values into a flat tuple list of lists
-        so we can permute
-        :param params:
-        :return:
-        """
-        flat_params = []
-        for i, (opt_name, opt_arg) in enumerate(params.items()):
-            if opt_arg.tunable:
-                clean_name = opt_name.strip('-')
-                clean_name = re.sub('-', '_', clean_name)
-                param_groups = []
-                for val in opt_arg.opt_values:
-                    param_groups.append({'idx': i, 'val': val, 'name': clean_name})
-                flat_params.append(param_groups)
-        return flat_params
 
 
 class TTNamespace(argparse.Namespace):
