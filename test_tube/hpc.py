@@ -378,7 +378,7 @@ class SlurmCluster(AbstractCluster):
             v = trial.__dict__[k]
 
             # don't add None params
-            if v is None or v is False:
+            if v is None: # or v is False:
                 continue
 
             # put everything in quotes except bools
