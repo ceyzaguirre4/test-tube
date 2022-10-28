@@ -120,11 +120,13 @@ class SlurmCluster(AbstractCluster):
             job_display_name=None,
             max_parallel_trials=None,         # Run at most `max_parallel_trials` at the same time
             debug=False,                        # if debug no experiments will run
+            slurm_account=None,
     ):
         if job_display_name is None:
             job_display_name = job_name
         
         self.max_parallel_trials = max_parallel_trials
+        self.slurm_account = slurm_account
 
         self.__optimize_parallel_cluster_internal(train_function, nb_trials, job_name, job_display_name,
                                                   enable_auto_resubmit, on_gpu=True, debug=debug)
@@ -138,11 +140,13 @@ class SlurmCluster(AbstractCluster):
             job_display_name=None,
             max_parallel_trials=None,         # Run at most `max_parallel_trials` at the same time
             debug=False,                        # if debug no experiments will run
+            slurm_account=None,
     ):
         if job_display_name is None:
             job_display_name = job_name
         
         self.max_parallel_trials = max_parallel_trials
+        self.slurm_account = slurm_account
 
         self.__optimize_parallel_cluster_internal(train_function, nb_trials, job_name, job_display_name,
                                                   enable_auto_resubmit, on_gpu=False, debug=debug)
@@ -156,6 +160,7 @@ class SlurmCluster(AbstractCluster):
             enable_auto_resubmit,
             on_gpu,
             debug=False,
+
     ):
         """
         Runs optimization on the attached cluster
@@ -403,6 +408,15 @@ class SlurmCluster(AbstractCluster):
             '#################\n'
         ]
         sub_commands.extend(command)
+
+        # add account info
+        if self.slurm_account:
+            command = [
+                '# set a account info',
+                '#SBATCH --account={}'.format(self.slurm_account),
+                '#################\n',
+            ]
+            sub_commands.extend(command)
 
         # add job name
         command = [
