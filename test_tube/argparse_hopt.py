@@ -77,6 +77,7 @@ class HyperOptArgumentParser(ArgumentParser):
     SLURM_LOAD_CMD = 'test_tube_do_checkpoint_load'
     WANDB_SWEEP_ID = 'wandb_sweep_id'
     WANDB_PROJECT_NAME = 'wandb_project_name'
+    WANDB_ENTITIY_NAME = 'wandb_entity_name'
     CMD_MAP = {
         TRIGGER_CMD: bool,
         SLURM_CMD_PATH: str,
@@ -84,9 +85,10 @@ class HyperOptArgumentParser(ArgumentParser):
         SLURM_LOAD_CMD: bool,
         WANDB_SWEEP_ID: str,
         WANDB_PROJECT_NAME: str,
+        WANDB_ENTITIY_NAME: str,
     }
 
-    def __init__(self, strategy='grid_search', wandb_project_name=None, **kwargs):
+    def __init__(self, strategy='grid_search', wandb_project_name=None, wandb_entity_name=None, **kwargs):
         """
 
         :param strategy: 'grid_search', 'random_search', 'wandb_grid_search', 'wandb_random_search'
@@ -98,6 +100,7 @@ class HyperOptArgumentParser(ArgumentParser):
 
         self.strategy = strategy
         self.wandb_project_name = wandb_project_name
+        self.wandb_entity_name = wandb_entity_name
         self.trials = []
         self.parsed_args = None
         self.opt_args = {}
@@ -310,9 +313,10 @@ class HyperOptArgumentParser(ArgumentParser):
             sweep_id = wandb.sweep(
                 sweep_config,
                 project=self.wandb_project_name,
+                entity=self.wandb_entity_name
             )
 
-            return [TTNamespace(wandb_project_name=self.wandb_project_name, wandb_sweep_id=sweep_id) for _ in range(nb_trials)]
+            return [TTNamespace(wandb_project_name=self.wandb_project_name, wandb_entity_name=self.wandb_entity_name, wandb_sweep_id=sweep_id) for _ in range(nb_trials)]
         else:
             trials = strategies.generate_trials(
                 strategy=self.strategy,
